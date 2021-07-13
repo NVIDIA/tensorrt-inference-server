@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2019, NVIDIA CORPORATION. All rights reserved.
+// Copyright (c) 2018-2021, NVIDIA CORPORATION. All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions
@@ -27,6 +27,7 @@
 
 #include <memory>
 #include <string>
+#include "src/core/model_config.h"
 #include "src/core/status.h"
 
 namespace nvidia { namespace inferenceserver {

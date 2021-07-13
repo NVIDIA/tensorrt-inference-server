@@ -25,17 +25,23 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
+#include <functional>
+#include <future>
 #include <memory>
 #include <string>
+#include <thread>
 #include "model_config.pb.h"
 #include "src/core/constants.h"
+#include "src/core/memory.h"
 #include "src/core/metric_model_reporter.h"
 #include "src/core/server_message.h"
 #include "src/core/status.h"
+#include "triton/common/sync_queue.h"
 
 namespace nvidia { namespace inferenceserver {
 
 class TritonModel;
+class InferenceRequest;
 
 //
 // Represents a model instance.
@@ -44,7 +50,7 @@ class TritonModelInstance {
  public:
   static Status CreateInstances(
       TritonModel* model, const HostPolicyCmdlineConfigMap& host_policy_map,
-      const inference::ModelConfig& model_config);
+      const inference::ModelConfig& model_config, const bool device_blocking);
   ~TritonModelInstance();
 
   const std::string& Name() const { return name_; }
@@ -59,7 +65,13 @@ class TritonModelInstance {
   bool IsPassive() const { return passive_; }
   const std::vector<std::string>& Profiles() const { return profile_names_; }
 
-  TritonModel* Model() { return model_; }
+  Status Initialize();
+  Status WarmUp();
+  void Schedule(
+      std::vector<std::unique_ptr<InferenceRequest>>&& requests,
+      const std::function<void()>& OnCompletion);
+
+  TritonModel* Model() const { return model_; }
   void* State() { return state_; }
   void SetState(void* state) { state_ = state; }
 
@@ -67,7 +79,7 @@ class TritonModelInstance {
 
  private:
   DISALLOW_COPY_AND_ASSIGN(TritonModelInstance);
-
+  class TritonBackendThread;
   TritonModelInstance(
       TritonModel* model, const std::string& name, const size_t index,
       const TRITONSERVER_InstanceGroupKind kind, const int32_t device_id,
@@ -79,7 +91,56 @@ class TritonModelInstance {
       const TRITONSERVER_InstanceGroupKind kind, const int32_t device_id,
       const std::vector<std::string>& profile_names, const bool passive,
       const std::string& host_policy_name,
-      const HostPolicyCmdlineConfig& host_policy);
+      const HostPolicyCmdlineConfig& host_policy,
+      const inference::ModelRateLimiter& rate_limiter_config,
+      const bool device_blocking,
+      std::map<uint32_t, std::shared_ptr<TritonBackendThread>>*
+          device_to_thread_map);
+  Status SetBackendThread(
+      const TRITONSERVER_InstanceGroupKind kind, const int32_t device_id,
+      const bool device_blocking,
+      std::map<uint32_t, std::shared_ptr<TritonBackendThread>>*
+          device_to_thread_map);
+  Status GenerateWarmupData();
+
+  void Execute(std::vector<TRITONBACKEND_Request*>& triton_requests);
+
+  class TritonBackendThread {
+   public:
+    static Status CreateBackendThread(
+        const std::string name, TritonModelInstance* model, const int nice,
+        const int32_t device_id,
+        std::unique_ptr<TritonBackendThread>* triton_backend_thread);
+    void AddModelInstance(TritonModelInstance* model_instance);
+    Status InitAndWarmUpModelInstance(TritonModelInstance* model_instance);
+    ~TritonBackendThread();
+
+   private:
+    TritonBackendThread(const std::string& name, TritonModel* model);
+    void BackendThread(const int nice, const int32_t device_id);
+
+    std::string name_;
+
+    TritonModel* model_;
+    std::deque<TritonModelInstance*> model_instances_;
+
+    std::thread backend_thread_;
+    std::atomic<bool> backend_thread_exit_;
+  };
+  std::shared_ptr<TritonBackendThread> triton_backend_thread_;
+
+  struct WarmupData {
+    WarmupData(const std::string& sample_name) : sample_name_(sample_name) {}
+
+    std::string sample_name_;
+    std::vector<std::unique_ptr<InferenceRequest>> requests_;
+
+    // Placeholder for input data
+    std::unique_ptr<AllocatedMemory> zero_data_;
+    std::unique_ptr<AllocatedMemory> random_data_;
+    std::vector<std::unique_ptr<std::string>> provided_data_;
+  };
+  std::vector<WarmupData> warmup_samples_;
 
   // The TritonModel object that owns this instance. The instance
   // holds this as a raw pointer because the lifetime of the model is
@@ -98,6 +159,8 @@ class TritonModelInstance {
   TritonServerMessage host_policy_message_;
   std::vector<std::string> profile_names_;
   bool passive_;
+
+  std::shared_ptr<TritonBackendThread> backend_thread_;
 
   // Reporter for metrics, or nullptr if no metrics should be reported
   std::shared_ptr<MetricModelReporter> reporter_;

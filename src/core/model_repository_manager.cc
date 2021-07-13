@@ -48,9 +48,6 @@
 #ifdef TRITON_ENABLE_ENSEMBLE
 #include "src/backends/ensemble/ensemble_backend_factory.h"
 #endif  // TRITON_ENABLE_ENSEMBLE
-#ifdef TRITON_ENABLE_TENSORRT
-#include "src/backends/tensorrt/plan_backend_factory.h"
-#endif  // TRITON_ENABLE_TENSORRT
 
 namespace nvidia { namespace inferenceserver {
 
@@ -244,15 +241,6 @@ BuildBackendConfigMap(
     const float tf_gpu_memory_fraction, const bool tf_allow_soft_placement,
     BackendConfigMap* backend_configs)
 {
-#ifdef TRITON_ENABLE_TENSORRT
-  //// TensorRT
-  {
-    auto plan_config = std::make_shared<PlanBackendFactory::Config>();
-    plan_config->autofill = !strict_model_config;
-    (*backend_configs)[kTensorRTPlanPlatform] = plan_config;
-  }
-#endif  // TRITON_ENABLE_TENSORRT
-
 #ifdef TRITON_ENABLE_ENSEMBLE
   //// Ensemble
   {
@@ -483,9 +471,6 @@ class ModelRepositoryManager::BackendLifeCycle {
   std::recursive_mutex map_mtx_;
 
   std::unique_ptr<TritonBackendFactory> triton_backend_factory_;
-#ifdef TRITON_ENABLE_TENSORRT
-  std::unique_ptr<PlanBackendFactory> plan_factory_;
-#endif  // TRITON_ENABLE_TENSORRT
 #ifdef TRITON_ENABLE_ENSEMBLE
   std::unique_ptr<EnsembleBackendFactory> ensemble_factory_;
 #endif  // TRITON_ENABLE_ENSEMBLE
@@ -506,14 +491,6 @@ ModelRepositoryManager::BackendLifeCycle::Create(
         server, backend_cmdline_config_map, host_policy_map,
         &(local_life_cycle->triton_backend_factory_)));
   }
-#ifdef TRITON_ENABLE_TENSORRT
-  {
-    const std::shared_ptr<BackendConfig>& config =
-        backend_config_map.find(kTensorRTPlanPlatform)->second;
-    RETURN_IF_ERROR(PlanBackendFactory::Create(
-        config, host_policy_map, &(local_life_cycle->plan_factory_)));
-  }
-#endif  // TRITON_ENABLE_TENSORRT
 #ifdef TRITON_ENABLE_ENSEMBLE
   {
     const std::shared_ptr<BackendConfig>& config =
@@ -1125,12 +1102,6 @@ ModelRepositoryManager::BackendLifeCycle::CreateInferenceBackend(
         backend_info->repository_path_, model_name, version, model_config, &is);
   } else {
     switch (backend_info->platform_) {
-#ifdef TRITON_ENABLE_TENSORRT
-      case Platform::PLATFORM_TENSORRT_PLAN:
-        status = plan_factory_->CreateBackend(
-            version_path, model_config, min_compute_capability_, &is);
-        break;
-#endif  // TRITON_ENABLE_TENSORRT
 #ifdef TRITON_ENABLE_ENSEMBLE
       case Platform::PLATFORM_ENSEMBLE: {
         status = ensemble_factory_->CreateBackend(

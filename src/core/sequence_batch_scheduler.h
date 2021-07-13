@@ -34,7 +34,10 @@
 #include <thread>
 #include <unordered_map>
 #include "model_config.pb.h"
+#include "src/backends/backend/triton_model.h"
+#include "src/backends/backend/triton_model_instance.h"
 #include "src/core/model_config.h"
+#include "src/core/rate_limiter.h"
 #include "src/core/scheduler.h"
 #include "src/core/scheduler_utils.h"
 #include "src/core/status.h"
@@ -55,9 +58,7 @@ class SequenceBatchScheduler : public Scheduler {
   // Create a scheduler to support a given number of runners and a run
   // function to call when a request is scheduled.
   static Status Create(
-      const inference::ModelConfig& config, const uint32_t runner_cnt,
-      const StandardInitFunc& OnInit, const StandardWarmupFunc& OnWarmup,
-      const StandardRunFunc& OnSchedule,
+      TritonModel* model,
       const std::unordered_map<std::string, bool>& enforce_equal_shape_tensors,
       std::unique_ptr<Scheduler>* scheduler);
 
@@ -229,10 +230,7 @@ class DirectSequenceBatch : public SequenceBatch {
  public:
   DirectSequenceBatch(
       SequenceBatchScheduler* base, const uint32_t batcher_idx,
-      const size_t seq_slot_cnt, const inference::ModelConfig& config,
-      const Scheduler::StandardInitFunc& OnInit,
-      const Scheduler::StandardWarmupFunc& OnWarmup,
-      const Scheduler::StandardRunFunc& OnSchedule,
+      const size_t seq_slot_cnt, TritonModelInstance* model_instance,
       const std::unordered_map<std::string, bool>& enforce_equal_shape_tensors,
       const std::shared_ptr<SequenceBatchScheduler::ControlInputs>&
           start_input_overrides,
@@ -244,7 +242,7 @@ class DirectSequenceBatch : public SequenceBatch {
           continue_input_overrides,
       const std::shared_ptr<SequenceBatchScheduler::ControlInputs>&
           notready_input_overrides,
-      std::promise<bool>* is_initialized);
+      bool* is_initialized);
   ~DirectSequenceBatch();
 
   void Enqueue(
@@ -252,16 +250,11 @@ class DirectSequenceBatch : public SequenceBatch {
       std::unique_ptr<InferenceRequest>& request) override;
 
  private:
-  void SchedulerThread(const int nice, std::promise<bool>* is_initialized);
+  void BatcherThread(const int nice);
+  void NewPayload();
 
-  // Function the scheduler will call to initialize a runner.
-  const Scheduler::StandardInitFunc OnInit_;
-
-  // Function the scheduler will call to warmup a runner.
-  const Scheduler::StandardWarmupFunc OnWarmup_;
-
-  // Function to call to execute this batch of requests.
-  const Scheduler::StandardRunFunc OnSchedule_;
+  std::shared_ptr<RateLimiter::Payload> curr_payload_;
+  TritonModelInstance* model_instance_;
 
   // The thread scheduling requests that are queued in this batch.
   std::unique_ptr<std::thread> scheduler_thread_;
@@ -299,10 +292,7 @@ class OldestSequenceBatch : public SequenceBatch {
  public:
   OldestSequenceBatch(
       SequenceBatchScheduler* base, const uint32_t batcher_idx,
-      const size_t seq_slot_cnt, const inference::ModelConfig& config,
-      const Scheduler::StandardInitFunc& OnInit,
-      const Scheduler::StandardWarmupFunc& OnWarmup,
-      const Scheduler::StandardRunFunc& OnSchedule,
+      const size_t seq_slot_cnt, TritonModelInstance* model_instance,
       const std::unordered_map<std::string, bool>& enforce_equal_shape_tensors,
       const std::shared_ptr<SequenceBatchScheduler::ControlInputs>&
           start_input_overrides,
@@ -314,7 +304,7 @@ class OldestSequenceBatch : public SequenceBatch {
           continue_input_overrides,
       const std::shared_ptr<SequenceBatchScheduler::ControlInputs>&
           notready_input_overrides,
-      std::promise<bool>* is_initialized);
+      bool* is_initialized);
   ~OldestSequenceBatch();
 
   void Enqueue(
@@ -326,6 +316,8 @@ class OldestSequenceBatch : public SequenceBatch {
 
   // The dynamic batcher for this scheduler
   std::unique_ptr<Scheduler> dynamic_batcher_;
+
+  TritonModelInstance* model_instance_;
 
   // Mutex protecting queues, etc.
   std::mutex mu_;

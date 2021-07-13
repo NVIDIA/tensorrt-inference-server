@@ -66,12 +66,15 @@ class TritonModel : public InferenceBackend {
       const uint32_t config_version,
       TRITONSERVER_Message* updated_config_message);
   const std::shared_ptr<TritonBackend>& Backend() const { return backend_; }
+  const std::vector<std::unique_ptr<TritonModelInstance>>& Instances() const
+  {
+    return instances_;
+  }
   void* State() { return state_; }
   void SetState(void* state) { state_ = state; }
-  void AddInstance(
-      std::unique_ptr<TritonModelInstance>&& instance, const bool passive);
-
-  void WarmUp(uint32_t runner_idx, WarmupData& sample) override;
+  Status AddInstance(
+      std::unique_ptr<TritonModelInstance>&& instance, const bool passive,
+      const inference::ModelRateLimiter& rate_limiter_config);
 
  private:
   DISALLOW_COPY_AND_ASSIGN(TritonModel);
@@ -81,6 +84,9 @@ class TritonModel : public InferenceBackend {
       const std::shared_ptr<LocalizedDirectory>& localized_model_dir,
       const std::shared_ptr<TritonBackend>& backend,
       const double min_compute_capability, const bool auto_complete_config);
+
+  Status Initialize();
+  Status WarmUp();
 
   // The server object that owns this model. The model holds this as a
   // raw pointer because the lifetime of the server is guaranteed to

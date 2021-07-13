@@ -38,6 +38,7 @@
 #include "src/core/model_config_utils.h"
 #include "src/core/model_repository_manager.h"
 #include "src/core/nvtx.h"
+#include "src/core/rate_limiter.h"
 #include "src/core/response_allocator.h"
 #include "src/core/server.h"
 #include "src/core/server_message.h"
@@ -55,6 +56,31 @@
 namespace ni = nvidia::inferenceserver;
 
 namespace {
+
+std::string
+ResourceString(const std::string& name, const int count, const int device_id)
+{
+  return std::string(
+      "{\"name\":\"" + name + "\", \"count\":" + std::to_string(count) +
+      " \"device\":" + std::to_string(device_id) + "}");
+}
+
+std::string
+RateLimitModeToString(const ni::RateLimitMode rate_limit_mode)
+{
+  std::string rl_mode_str("<unknown>");
+  switch (rate_limit_mode) {
+    case ni::RateLimitMode::RL_EXEC_COUNT: {
+      rl_mode_str = "EXEC_COUNT";
+      break;
+    }
+    case ni::RateLimitMode::RL_OFF: {
+      rl_mode_str = "OFF";
+      break;
+    }
+  }
+  return rl_mode_str;
+}
 
 //
 // TritonServerError
@@ -187,6 +213,19 @@ class TritonServerOptions {
         std::string(), "auto-complete-config", b ? "false" : "true");
   }
 
+  ni::RateLimitMode RateLimiterMode() const { return rate_limit_mode_; }
+  void SetRateLimiterMode(ni::RateLimitMode m) { rate_limit_mode_ = m; }
+
+  TRITONSERVER_Error* AddRateLimiterResource(
+      const std::string& resource, const size_t count, const int device);
+
+  // The resource map is the map from device id to the map of
+  // of resources with their respective counts for that device.
+  const ni::RateLimiter::ResourceMap& RateLimiterResources() const
+  {
+    return rate_limit_resource_map_;
+  }
+
   uint64_t PinnedMemoryPoolByteSize() const { return pinned_memory_pool_size_; }
   void SetPinnedMemoryPoolByteSize(uint64_t s) { pinned_memory_pool_size_ = s; }
 
@@ -276,6 +315,8 @@ class TritonServerOptions {
   bool exit_on_error_;
   bool strict_model_config_;
   bool strict_readiness_;
+  ni::RateLimitMode rate_limit_mode_;
+  ni::RateLimiter::ResourceMap rate_limit_resource_map_;
   bool metrics_;
   bool gpu_metrics_;
   unsigned int exit_timeout_;
@@ -296,8 +337,9 @@ TritonServerOptions::TritonServerOptions()
     : server_id_("triton"),
       model_control_mode_(ni::ModelControlMode::MODE_POLL),
       exit_on_error_(true), strict_model_config_(true), strict_readiness_(true),
-      metrics_(true), gpu_metrics_(true), exit_timeout_(30),
-      pinned_memory_pool_size_(1 << 28), buffer_manager_thread_count_(0),
+      rate_limit_mode_(ni::RateLimitMode::RL_EXEC_COUNT), metrics_(true),
+      gpu_metrics_(true), exit_timeout_(30), pinned_memory_pool_size_(1 << 28),
+      buffer_manager_thread_count_(0),
 #ifdef TRITON_ENABLE_GPU
       min_compute_capability_(TRITON_MIN_COMPUTE_CAPABILITY),
 #else
@@ -348,6 +390,29 @@ ParseFloatOption(const std::string arg, float* val)
     return TRITONSERVER_ErrorNew(
         TRITONSERVER_ERROR_INVALID_ARG,
         std::string("invalid value for float option: '" + arg + "'").c_str());
+  }
+
+  return nullptr;  // success
+}
+
+TRITONSERVER_Error*
+TritonServerOptions::AddRateLimiterResource(
+    const std::string& name, const size_t count, const int device)
+{
+  auto ditr = rate_limit_resource_map_.find(device);
+  if (ditr == rate_limit_resource_map_.end()) {
+    ditr = rate_limit_resource_map_
+               .emplace(device, std::map<std::string, size_t>())
+               .first;
+  }
+  auto ritr = ditr->second.find(name);
+  if (ritr == ditr->second.end()) {
+    ditr->second.emplace(name, count).first;
+  } else {
+    // If already present then store the minimum of the two.
+    if (ritr->second > count) {
+      ritr->second = count;
+    }
   }
 
   return nullptr;  // success
@@ -963,6 +1028,45 @@ TRITONSERVER_ServerOptionsSetStrictModelConfig(
   loptions->SetStrictModelConfig(strict);
   return nullptr;  // Success
 }
+
+TRITONSERVER_Error*
+TRITONSERVER_ServerOptionsSetRateLimiterMode(
+    TRITONSERVER_ServerOptions* options, TRITONSERVER_RateLimitMode mode)
+{
+  TritonServerOptions* loptions =
+      reinterpret_cast<TritonServerOptions*>(options);
+
+  // convert mode from TRITONSERVER_ to nvidia::inferenceserver
+  switch (mode) {
+    case TRITONSERVER_RATE_LIMIT_EXEC_COUNT: {
+      loptions->SetRateLimiterMode(ni::RateLimitMode::RL_EXEC_COUNT);
+      break;
+    }
+    case TRITONSERVER_RATE_LIMIT_OFF: {
+      loptions->SetRateLimiterMode(ni::RateLimitMode::RL_OFF);
+      break;
+    }
+    default: {
+      return TRITONSERVER_ErrorNew(
+          TRITONSERVER_ERROR_INVALID_ARG,
+          std::string("unknown rate limit mode '" + std::to_string(mode) + "'")
+              .c_str());
+    }
+  }
+
+  return nullptr;  // Success
+}
+
+TRITONSERVER_Error*
+TRITONSERVER_ServerOptionsAddRateLimiterResource(
+    TRITONSERVER_ServerOptions* options, const char* name, const size_t count,
+    const int device)
+{
+  TritonServerOptions* loptions =
+      reinterpret_cast<TritonServerOptions*>(options);
+  return loptions->AddRateLimiterResource(name, count, device);
+}
+
 
 TRITONSERVER_Error*
 TRITONSERVER_ServerOptionsSetPinnedMemoryPoolByteSize(
@@ -1614,6 +1718,8 @@ TRITONSERVER_ServerNew(
   lserver->SetModelControlMode(loptions->ModelControlMode());
   lserver->SetStartupModels(loptions->StartupModels());
   lserver->SetStrictModelConfigEnabled(loptions->StrictModelConfig());
+  lserver->SetRateLimiterMode(loptions->RateLimiterMode());
+  lserver->SetRateLimiterResources(loptions->RateLimiterResources());
   lserver->SetPinnedMemoryPoolByteSize(loptions->PinnedMemoryPoolByteSize());
   lserver->SetCudaMemoryPoolByteSize(loptions->CudaMemoryPoolByteSize());
   lserver->SetMinSupportedComputeCapability(
@@ -1694,6 +1800,18 @@ TRITONSERVER_ServerNew(
   options_table.InsertRow(std::vector<std::string>{
       "strict_model_config",
       std::to_string(lserver->StrictModelConfigEnabled())});
+  std::string rate_limit = RateLimitModeToString(lserver->RateLimiterMode());
+  options_table.InsertRow(std::vector<std::string>{"rate_limit", rate_limit});
+  i = 0;
+  for (const auto& device_resources : lserver->RateLimiterResources()) {
+    for (const auto& resource : device_resources.second) {
+      options_table.InsertRow(std::vector<std::string>{
+          "rate_limit_resource[" + std::to_string(i) + "]",
+          ResourceString(
+              resource.first, resource.second, device_resources.first)});
+      ++i;
+    }
+  }
   options_table.InsertRow(std::vector<std::string>{
       "pinned_memory_pool_byte_size",
       std::to_string(lserver->PinnedMemoryPoolByteSize())});

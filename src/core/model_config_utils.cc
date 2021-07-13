@@ -639,6 +639,11 @@ GetNormalizedModelConfig(
 
   // Fill backend if platform is set for non-custom backend
   if (config->backend().empty() && !config->platform().empty()) {
+#ifdef TRITON_ENABLE_TENSORRT
+    if ((config->platform() == kTensorRTPlanPlatform)) {
+      config->set_backend(kTensorRTBackend);
+    }
+#endif  // TRITON_ENABLE_TENSORFLOW
 #ifdef TRITON_ENABLE_TENSORFLOW
     if ((config->platform() == kTensorFlowGraphDefPlatform) ||
         (config->platform() == kTensorFlowSavedModelPlatform)) {
@@ -976,20 +981,10 @@ ValidateModelConfig(
   // or both referring to unknown backend for user-provided backend.
   if (GetBackendTypeFromPlatform(config.platform()) !=
       GetBackendType(config.backend())) {
-    switch (GetBackendTypeFromPlatform(config.platform())) {
-#ifdef TRITON_ENABLE_TENSORRT
-      case BackendType::BACKEND_TYPE_TENSORRT:
-#endif  // TRITON_ENABLE_TENSORRT
-        // FIXME: Do nothing for above type until they are ported with backend
-        // API
-        break;
-      default:
-        return Status(
-            Status::Code::INVALID_ARG,
-            "unexpected 'platform' and 'backend' pair, got:" +
-                config.platform() + ", " + config.backend());
-        break;
-    }
+    return Status(
+        Status::Code::INVALID_ARG,
+        "unexpected 'platform' and 'backend' pair, got:" + config.platform() +
+            ", " + config.backend());
   }
 
   if (config.max_batch_size() < 0) {

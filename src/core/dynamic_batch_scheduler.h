@@ -35,7 +35,10 @@
 #include <set>
 #include <thread>
 #include "model_config.pb.h"
+#include "src/backends/backend/triton_model.h"
+#include "src/backends/backend/triton_model_instance.h"
 #include "src/core/model_config.h"
+#include "src/core/rate_limiter.h"
 #include "src/core/scheduler.h"
 #include "src/core/scheduler_utils.h"
 #include "src/core/status.h"
@@ -48,10 +51,8 @@ class DynamicBatchScheduler : public Scheduler {
   // Create a scheduler to support a given number of runners and a run
   // function to call when a request is scheduled.
   static Status Create(
-      const uint32_t runner_id_start, const uint32_t runner_cnt, const int nice,
-      const StandardInitFunc& OnInit, const StandardWarmupFunc& OnWarmup,
-      const StandardRunFunc& OnSchedule, const bool dynamic_batching_enabled,
-      const int32_t max_batch_size,
+      TritonModel* model, TritonModelInstance* model_instance, const int nice,
+      const bool dynamic_batching_enabled, const int32_t max_batch_size,
       const std::unordered_map<std::string, bool>& enforce_equal_shape_tensors,
       const bool preserve_ordering,
       const std::set<int32_t>& preferred_batch_sizes,
@@ -62,10 +63,8 @@ class DynamicBatchScheduler : public Scheduler {
   // function to call when a request is scheduled. And the scheduler also
   // supports different queue policies for different priority levels.
   static Status Create(
-      const uint32_t runner_id_start, const uint32_t runner_cnt, const int nice,
-      const StandardInitFunc& OnInit, const StandardWarmupFunc& OnWarmup,
-      const StandardRunFunc& OnSchedule, const bool dynamic_batching_enabled,
-      const int32_t max_batch_size,
+      TritonModel* model, TritonModelInstance* model_instance, const int nice,
+      const bool dynamic_batching_enabled, const int32_t max_batch_size,
       const std::unordered_map<std::string, bool>& enforce_equal_shape_tensors,
       const inference::ModelDynamicBatching& batcher_config,
       std::unique_ptr<Scheduler>* scheduler);
@@ -77,10 +76,8 @@ class DynamicBatchScheduler : public Scheduler {
 
  private:
   DynamicBatchScheduler(
-      const uint32_t runner_id_start, const uint32_t runner_cnt,
-      const StandardInitFunc& OnInit, const StandardWarmupFunc& OnWarmup,
-      const StandardRunFunc& OnSchedule, const bool dynamic_batching_enabled,
-      const int32_t max_batch_size,
+      TritonModel* model, TritonModelInstance* model_instance,
+      const bool dynamic_batching_enabled, const int32_t max_batch_size,
       const std::unordered_map<std::string, bool>& enforce_equal_shape_tensors,
       const bool preserve_ordering,
       const std::set<int32_t>& preferred_batch_sizes,
@@ -88,42 +85,36 @@ class DynamicBatchScheduler : public Scheduler {
       const inference::ModelQueuePolicy& default_queue_policy,
       const uint32_t priority_levels,
       const ModelQueuePolicyMap& queue_policy_map);
-  void SchedulerThread(
-      const uint32_t runner_id, const int nice,
-      const std::shared_ptr<std::atomic<bool>>& rthread_exit,
-      std::promise<bool>* is_initialized);
-  uint64_t GetDynamicBatch(const int64_t runner_id);
+
+  void BatcherThread(const int nice);
+  void NewPayload();
+  uint64_t GetDynamicBatch();
+  void DelegateResponse(std::unique_ptr<InferenceRequest>& request);
   void FinalizeResponses();
 
-  // Function the scheduler will call to initialize a runner.
-  const StandardInitFunc OnInit_;
-
-  // Function the scheduler will call to warmup a runner.
-  const StandardWarmupFunc OnWarmup_;
-
-  // Function the scheduler will call to schedule a batch of requests.
-  const StandardRunFunc OnSchedule_;
+  // FIXME: Use shared_ptr for model once InferenceBackend class is cleaned up.
+  TritonModel* model_;
+  TritonModelInstance* model_instance_;
 
   // True if dynamic batching is enabled.
   const bool dynamic_batching_enabled_;
-
-  // The number of scheduler threads.
-  const uint32_t scheduler_thread_cnt_;
-
-  // The number of scheduler threads currently idle.
-  uint32_t idle_scheduler_thread_cnt_;
-
-  // Mutex and condvar protecting the scheduling queue.
-  std::mutex mu_;
-  std::condition_variable cv_;
 
   // Map from priority level to queue holding inference requests for the model
   // represented by this scheduler. If priority queues are not supported by the
   // scheduler, then priority zero entry is used as the single queue.
   PriorityQueue queue_;
 
-  std::vector<std::unique_ptr<std::thread>> scheduler_threads_;
-  std::vector<std::shared_ptr<std::atomic<bool>>> scheduler_threads_exit_;
+  std::thread scheduler_thread_;
+  std::atomic<bool> scheduler_thread_exit_;
+
+  // Mutex and condvar for signaling scheduler thread
+  std::mutex mu_;
+  std::condition_variable cv_;
+
+  std::shared_ptr<RateLimiter> rate_limiter_;
+
+  std::shared_ptr<RateLimiter::Payload> curr_payload_;
+  bool payload_saturated_;
 
   size_t max_batch_size_;
   size_t max_preferred_batch_size_;

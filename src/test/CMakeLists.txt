@@ -407,67 +407,67 @@ install(
   RUNTIME DESTINATION bin
 )
 
+##
+## RateLimiter
+##
 #
-# RateLimiter
+#set(
+#  RATE_LIMITER_SRCS
+#  ../core/rate_limiter.cc
+#  ../core/status.cc
+#)
 #
-
-set(
-  RATE_LIMITER_SRCS
-  ../core/rate_limiter.cc
-  ../core/status.cc
-)
-
-set(
-  RATE_LIMITER_HDRS
-  ../core/rate_limiter.h
-  ${MODEL_CONFIG_PROTO_HDR}
-)
-
-set(
-  RATE_LIMITER_TEST_SRCS
-  rate_limiter_test.cc
-  ${RATE_LIMITER_SRCS}
-)
-
-set(
-  RATE_LIMITER_TEST_HDRS
-  ${RATE_LIMITER_HDRS}
-)
-
-add_executable(
-  rate_limiter_test
-  ${RATE_LIMITER_TEST_SRCS}
-  ${RATE_LIMITER_TEST_HDRS}
-  $<TARGET_OBJECTS:proto-library>
-)
-set_target_properties(
-  rate_limiter_test
-  PROPERTIES
-    SKIP_BUILD_RPATH TRUE
-    BUILD_WITH_INSTALL_RPATH TRUE
-    INSTALL_RPATH_USE_LINK_PATH FALSE
-    INSTALL_RPATH ""
-)
-target_include_directories(
-  rate_limiter_test
-  PRIVATE ${GTEST_INCLUDE_DIR}
-)
-if(${TRITON_ENABLE_GPU})
-  target_include_directories(rate_limiter_test PRIVATE ${CUDA_INCLUDE_DIRS})
-endif() # TRITON_ENABLE_GPU
-target_link_libraries(
-  rate_limiter_test
-  PRIVATE triton-common-error     # from repo-common
-  PRIVATE triton-core-serverapi   # from repo-core
-  PRIVATE proto-library           # from repo-common
-  PRIVATE ${GTEST_LIBRARY}
-  PRIVATE ${GTEST_MAIN_LIBRARY}
-  PRIVATE protobuf::libprotobuf
-)
-install(
-  TARGETS rate_limiter_test
-  RUNTIME DESTINATION bin
-)
+#set(
+#  RATE_LIMITER_HDRS
+#  ../core/rate_limiter.h
+#  ${MODEL_CONFIG_PROTO_HDR}
+#)
+#
+#set(
+#  RATE_LIMITER_TEST_SRCS
+#  rate_limiter_test.cc
+#  ${RATE_LIMITER_SRCS}
+#)
+#
+#set(
+#  RATE_LIMITER_TEST_HDRS
+#  ${RATE_LIMITER_HDRS}
+#)
+#
+#add_executable(
+#  rate_limiter_test
+#  ${RATE_LIMITER_TEST_SRCS}
+#  ${RATE_LIMITER_TEST_HDRS}
+#  $<TARGET_OBJECTS:proto-library>
+#)
+#set_target_properties(
+#  rate_limiter_test
+#  PROPERTIES
+#    SKIP_BUILD_RPATH TRUE
+#    BUILD_WITH_INSTALL_RPATH TRUE
+#    INSTALL_RPATH_USE_LINK_PATH FALSE
+#    INSTALL_RPATH ""
+#)
+#target_include_directories(
+#  rate_limiter_test
+#  PRIVATE ${GTEST_INCLUDE_DIR}
+#)
+#if(${TRITON_ENABLE_GPU})
+#  target_include_directories(rate_limiter_test PRIVATE ${CUDA_INCLUDE_DIRS})
+#endif() # TRITON_ENABLE_GPU
+#target_link_libraries(
+#  rate_limiter_test
+#  PRIVATE triton-common-error     # from repo-common
+#  PRIVATE triton-core-serverapi   # from repo-core
+#  PRIVATE proto-library           # from repo-common
+#  PRIVATE ${GTEST_LIBRARY}
+#  PRIVATE ${GTEST_MAIN_LIBRARY}
+#  PRIVATE protobuf::libprotobuf
+#)
+#install(
+#  TARGETS rate_limiter_test
+#  RUNTIME DESTINATION bin
+#)
 
 add_subdirectory(sequence sequence)
 add_subdirectory(dyna_sequence dyna_sequence)

@@ -108,7 +108,9 @@ RUN mkdir -p qa/common && \
     cp /tmp/tritonbuild/tritonserver/build/test-util/install/bin/pinned_memory_manager_test qa/L0_memory/. && \
     cp /tmp/tritonbuild/tritonserver/build/test-util/install/bin/triton_repo_agent_test qa/L0_triton_repo_agent/. && \
     cp /tmp/tritonbuild/tritonserver/build/test-util/install/lib/libtritonrepoagent_relocation.so qa/L0_triton_repo_agent/. && \
-    cp /tmp/tritonbuild/tritonserver/build/test-util/install/bin/rate_limiter_test qa/L0_rate_limiter/. && \
+#   FIXME: Uncomment after fixing the rate limiter unit tests to use the new TritonModel and
+#   TritonModelInstance abstraction.
+#   cp /tmp/tritonbuild/tritonserver/build/test-util/install/bin/rate_limiter_test qa/L0_rate_limiter/. && \
     cp /tmp/tritonbuild/tritonserver/build/test-util/install/bin/async_work_queue_test qa/L0_async_work_queue/. && \
     mkdir qa/L0_data_compression/models && \
     cp -r /workspace/docs/examples/model_repository/simple qa/L0_data_compression/models && \

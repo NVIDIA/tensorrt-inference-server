@@ -33,6 +33,7 @@
 #include "src/core/logging.h"
 #include "src/core/model_config_utils.h"
 #include "src/core/numa_utils.h"
+#include "src/core/server.h"
 #include "src/core/server_message.h"
 #include "src/core/shared_library.h"
 #include "src/core/tritonserver_apis.h"
@@ -168,76 +169,37 @@ TritonModel::Create(
   }
   local_model->initialized_ = true;
 
+  // FIXME: Should we use device blocking even for the sequential models?
+  const bool device_blocking =
+      (local_model->backend_->ExecutionPolicy() ==
+       TRITONBACKEND_EXECUTION_DEVICE_BLOCKING);
+
   // Create and initialize the model instances for this model.
   RETURN_IF_ERROR(TritonModelInstance::CreateInstances(
-      raw_local_model, host_policy_map, model_config));
+      raw_local_model, host_policy_map, model_config, device_blocking));
 
-  // Create a scheduler with 1 thread per instance. The backend is
-  // already initialized so there is no need to have the scheduler
-  // thread call any initialization.
-  RETURN_IF_ERROR(local_model->SetConfiguredScheduler(
-      local_model->instances_.size() /* runner_cnt */,
-      /* Initialization callback */
-      [raw_local_model](uint32_t runner_idx) -> Status {
-        // Get the device kind and id of the associated instance to
-        // set NUMA config for the thread
-        const auto& instance = raw_local_model->instances_[runner_idx];
-        RETURN_IF_ERROR(SetNumaConfigOnThread(instance->HostPolicy()));
-        return Status::Success;
-      },
-      /* Run callback */
-      [raw_local_model, backend](
-          uint32_t runner_idx,
-          std::vector<std::unique_ptr<InferenceRequest>>&& requests) {
-        // Use a thread local vector to avoid needing to malloc each
-        // time an inference is run.
-        thread_local std::vector<TRITONBACKEND_Request*> triton_requests(1024);
-        triton_requests.clear();
-        for (auto& r : requests) {
-          triton_requests.push_back(
-              reinterpret_cast<TRITONBACKEND_Request*>(r.release()));
-        }
-
-        TRITONBACKEND_ModelInstance* triton_model_instance =
-            reinterpret_cast<TRITONBACKEND_ModelInstance*>(
-                raw_local_model->instances_[runner_idx].get());
-        TritonBackend::TritonModelInstanceExecFn_t inst_exec_fn =
-            backend->ModelInstanceExecFn();
-
-        // If there is an error then we retain ownership of 'requests'
-        // and must send error responses.
-        TRITONSERVER_Error* err = inst_exec_fn(
-            triton_model_instance, &triton_requests[0], triton_requests.size());
-        if (err != nullptr) {
-          Status status = Status(
-              TritonCodeToStatusCode(TRITONSERVER_ErrorCode(err)),
-              TRITONSERVER_ErrorMessage(err));
-          for (TRITONBACKEND_Request* tr : triton_requests) {
-            std::unique_ptr<InferenceRequest> ur(
-                reinterpret_cast<InferenceRequest*>(tr));
-            InferenceRequest::RespondIfError(
-                ur, status, true /* release_requests */);
-          }
-
-          TRITONSERVER_ErrorDelete(err);
-        }
-
-        return Status::Success;
-      }));
+  RETURN_IF_ERROR(
+      local_model->SetConfiguredScheduler(static_cast<void*>(raw_local_model)));
 
   *model = std::move(local_model);
   return Status::Success;
 }
 
-void
+Status
 TritonModel::AddInstance(
-    std::unique_ptr<TritonModelInstance>&& instance, const bool passive)
+    std::unique_ptr<TritonModelInstance>&& instance, const bool passive,
+    const inference::ModelRateLimiter& rate_limiter_config)
 {
   if (passive) {
     passive_instances_.emplace_back(std::move(instance));
   } else {
+    TritonModelInstance* raw_instance = instance.get();
     instances_.emplace_back(std::move(instance));
+    RETURN_IF_ERROR(server_->GetRateLimiter()->RegisterModelInstance(
+        raw_instance, rate_limiter_config));
   }
+
+  return Status::Success;
 }
 
 Status
@@ -270,43 +232,24 @@ TritonModel::UpdateModelConfig(
   return Status::Success;
 }
 
-void
-TritonModel::WarmUp(uint32_t runner_idx, WarmupData& sample)
+Status
+TritonModel::Initialize()
 {
-  std::vector<TRITONBACKEND_Request*> triton_requests(1024);
-  triton_requests.clear();
-  for (auto& request : sample.requests_) {
-    // Capture timestamp before run to avoid incorrect accumulation from
-    // sequential warmup runs
-#ifdef TRITON_ENABLE_STATS
-    request->CaptureRequestStartNs();
-#endif  // TRITON_ENABLE_STATS
-    request->CaptureQueueStartNs();
-    triton_requests.push_back(
-        reinterpret_cast<TRITONBACKEND_Request*>(request.release()));
+  for (const auto& instance : instances_) {
+    RETURN_IF_ERROR(instance->Initialize());
   }
-  TRITONBACKEND_ModelInstance* triton_model_instance =
-      reinterpret_cast<TRITONBACKEND_ModelInstance*>(
-          instances_[runner_idx].get());
-  TritonBackend::TritonModelInstanceExecFn_t inst_exec_fn =
-      backend_->ModelInstanceExecFn();
 
-  // If there is an error then we retain ownership of 'requests'
-  // and must send error responses.
-  TRITONSERVER_Error* err = inst_exec_fn(
-      triton_model_instance, &triton_requests[0], triton_requests.size());
-  if (err != nullptr) {
-    Status status = Status(
-        TritonCodeToStatusCode(TRITONSERVER_ErrorCode(err)),
-        TRITONSERVER_ErrorMessage(err));
-    for (TRITONBACKEND_Request* tr : triton_requests) {
-      std::unique_ptr<InferenceRequest> ur(
-          reinterpret_cast<InferenceRequest*>(tr));
-      InferenceRequest::RespondIfError(ur, status, true /* release_requests */);
-    }
+  return Status::Success;
+}
 
-    TRITONSERVER_ErrorDelete(err);
+Status
+TritonModel::WarmUp()
+{
+  for (const auto& instance : instances_) {
+    RETURN_IF_ERROR(instance->WarmUp());
   }
+
+  return Status::Success;
 }
 
 TritonModel::TritonModel(
@@ -334,6 +277,9 @@ TritonModel::~TritonModel()
   // the model itself.
   instances_.clear();
   passive_instances_.clear();
+
+  // Unregister itself from the rate limiter
+  server_->GetRateLimiter()->UnregisterModel(this);
 
   // Model finalization is optional... The TRITONBACKEND_Model
   // object is this TritonModel object.
@@ -853,7 +799,7 @@ TRITONBACKEND_InputPropertiesForHostPolicy(
       *byte_size = ti->Data(host_policy_name)->TotalByteSize();
     }
     if (buffer_count != nullptr) {
-        *buffer_count = ti->DataBufferCountForHostPolicy(host_policy_name);
+      *buffer_count = ti->DataBufferCountForHostPolicy(host_policy_name);
     }
   } else {
     if (byte_size != nullptr) {

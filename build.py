@@ -74,10 +74,10 @@ TRITON_VERSION_MAP = {
 }
 
 EXAMPLE_BACKENDS = ['identity', 'square', 'repeat']
-CORE_BACKENDS = ['tensorrt', 'ensemble']
+CORE_BACKENDS = ['ensemble']
 NONCORE_BACKENDS = [
     'tensorflow1', 'tensorflow2', 'onnxruntime', 'python', 'dali', 'pytorch',
-    'openvino', 'fil', 'fastertransformer'
+    'openvino', 'fil',  'fastertransformer', 'tensorrt'
 ]
 EXAMPLE_REPOAGENTS = ['checksum']
 FLAGS = None
@@ -269,10 +269,10 @@ def core_cmake_args(components, backends, install_dir):
         if not be.startswith('tensorflow'):
             cargs.append('-DTRITON_ENABLE_{}={}'.format(
                 be.upper(), cmake_enable(be in backends)))
-        if (be in CORE_BACKENDS) and (be in backends):
-            if be == 'tensorrt':
+        if be == 'tensorrt':
                 cargs += tensorrt_cmake_args()
-            elif be == 'ensemble':
+        if (be in CORE_BACKENDS) and (be in backends):
+            if be == 'ensemble':
                 pass
             else:
                 fail('unknown core backend {}'.format(be))
@@ -342,6 +342,8 @@ def backend_cmake_args(images, components, be, install_dir, library_paths):
         args = fil_cmake_args(images)
     elif be == 'fastertransformer':
         args = []
+    elif be == 'tensorrt':
+        args = tensorrt_cmake_args()
     elif be in EXAMPLE_BACKENDS:
         args = []
     else:

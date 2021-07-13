@@ -37,6 +37,7 @@
 #include "src/core/model_config.h"
 #include "src/core/model_repository_manager.h"
 #include "src/core/persistent_backend_manager.h"
+#include "src/core/rate_limiter.h"
 #include "src/core/status.h"
 
 namespace nvidia { namespace inferenceserver {
@@ -45,6 +46,8 @@ class InferenceBackend;
 class InferenceRequest;
 
 enum class ModelControlMode { MODE_NONE, MODE_POLL, MODE_EXPLICIT };
+
+enum class RateLimitMode { RL_EXEC_COUNT, RL_OFF };
 
 // Readiness status for the inference server.
 enum class ServerReadyState {
@@ -156,6 +159,20 @@ class InferenceServer {
   bool StrictModelConfigEnabled() const { return strict_model_config_; }
   void SetStrictModelConfigEnabled(bool e) { strict_model_config_ = e; }
 
+  // Get / set rate limiter mode.
+  RateLimitMode RateLimiterMode() const { return rate_limit_mode_; }
+  void SetRateLimiterMode(RateLimitMode m) { rate_limit_mode_ = m; }
+
+  // Get / set rate limit resource counts
+  const RateLimiter::ResourceMap& RateLimiterResources() const
+  {
+    return rate_limit_resource_map_;
+  }
+  void SetRateLimiterResources(const RateLimiter::ResourceMap& rm)
+  {
+    rate_limit_resource_map_ = rm;
+  }
+
   // Get / set the pinned memory pool byte size.
   int64_t PinnedMemoryPoolByteSize() const { return pinned_memory_pool_size_; }
   void SetPinnedMemoryPoolByteSize(int64_t s)
@@ -239,6 +256,9 @@ class InferenceServer {
         model_name, model_version, backend);
   }
 
+  // Return the pointer to RateLimiter object.
+  std::shared_ptr<RateLimiter> GetRateLimiter() { return rate_limiter_; }
+
  private:
   const std::string version_;
   std::string id_;
@@ -257,6 +277,8 @@ class InferenceServer {
   BackendCmdlineConfigMap backend_cmdline_config_map_;
   HostPolicyCmdlineConfigMap host_policy_map_;
   std::string repoagent_dir_;
+  RateLimitMode rate_limit_mode_;
+  RateLimiter::ResourceMap rate_limit_resource_map_;
 
   // FIXME, remove once all backends use backend config.
   // Tensorflow options
@@ -272,6 +294,7 @@ class InferenceServer {
   // requests but that is determined by backend shared_ptr).
   std::atomic<uint64_t> inflight_request_counter_;
 
+  std::shared_ptr<RateLimiter> rate_limiter_;
   std::unique_ptr<ModelRepositoryManager> model_repository_manager_;
   std::shared_ptr<PersistentBackendManager> persist_backend_manager_;
 };

@@ -143,6 +143,7 @@ set(
   shared_library.cc
   infer_stats.cc
   infer_trace.cc
+  rate_limiter.cc
   status.cc
   tritonserver.cc
 )
@@ -172,6 +173,7 @@ set(
   nvtx.h
   persistent_backend_manager.h
   pinned_memory_manager.h
+  rate_limiter.h
   response_allocator.h
   scheduler.h
   scheduler_utils.h

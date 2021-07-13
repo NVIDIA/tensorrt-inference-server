@@ -32,21 +32,11 @@ cmake_minimum_required (VERSION 3.18)
 set(
   PLAN_SRCS
   autofill.cc
-  loader.cc
-  logging.cc
-  plan_backend_factory.cc
-  plan_backend.cc
-  plan_utils.cc
 )
 
 set(
   PLAN_HDRS
   autofill.h
-  loader.h
-  logging.h
-  plan_backend_factory.h
-  plan_backend.h
-  plan_utils.h
 )
 
 add_library(
