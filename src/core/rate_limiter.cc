@@ -212,6 +212,10 @@ RateLimiter::DequeuePayload(
         payload_queue->queue_.pop_front();
       }
     }
+    {
+      std::lock_guard<std::mutex> exec_lock(*((*payload)->GetExecMutex()));
+      (*payload)->SetState(Payload::State::EXECUTING);
+    }
     (*payload)->Callback();
     if ((*payload)->GetInstance() == nullptr) {
       (*payload)->SetInstance(instances.front());
@@ -336,10 +340,6 @@ void
 RateLimiter::Payload::Execute(bool* should_exit)
 {
   *should_exit = false;
-  {
-    std::lock_guard<std::mutex> lock(*exec_mu_);
-    state_ = State::EXECUTING;
-  }
 
   Status status;
   switch (op_type_) {

@@ -655,8 +655,6 @@ TritonModelInstance::TritonBackendThread::BackendThread(
   bool should_exit = false;
   while (!should_exit) {
     std::shared_ptr<RateLimiter::Payload> payload;
-    // TODO: For device blocking there can be multiple model instances being
-    // managed by this thread.
     model_->Server()->GetRateLimiter()->DequeuePayload(
         model_instances_, &payload);
     NVTX_RANGE(nvtx_, "BackendThread " + name_);
