@@ -54,6 +54,9 @@ TRITON_VERSION=21.06
 ONNX_VERSION=1.7.0
 ONNX_OPSET=0
 
+# OPENVINO version
+OPENVINO_VERSION=2021.2.200
+
 ONNX_IMAGE=${ONNX_IMAGE:=ubuntu:20.04}
 PYTORCH_IMAGE=${PYTORCH_IMAGE:=nvcr.io/nvidia/pytorch:$TRITON_VERSION-py3}
 TENSORFLOW_IMAGE=${TENSORFLOW_IMAGE:=nvcr.io/nvidia/tensorflow:$TRITON_VERSION-tf1-py3}
@@ -127,6 +130,7 @@ cp ./test_util.py $HOST_SRCDIR/.
 cp ./gen_tag_sigdef.py $HOST_SRCDIR/.
 
 ONNXSCRIPT=onnx_gen.cmds
+OPENVINOSCRIPT=openvino_gen.cmds
 TORCHSCRIPT=torch_gen.cmds
 TFSCRIPT=tf_gen.cmds
 TRTSCRIPT=trt_gen.cmds
@@ -147,6 +151,65 @@ NOSHAPEDESTDIR=/tmp/noshapemodels
 PLGDESTDIR=/tmp/pluginmodels
 RAGGEDDESTDIR=/tmp/raggedmodels
 FORMATDESTDIR=/tmp/formatmodels
+
+# OPENVINO
+cat >$HOST_SRCDIR/$OPENVINOSCRIPT <<EOF
+#!/bin/bash
+set -e
+export DEBIAN_FRONTEND=noninteractive
+apt-get update && \
+    apt-get install -y --no-install-recommends build-essential cmake libprotobuf-dev \
+            protobuf-compiler python3 python3-dev python3-pip wget gnupg2 \
+            software-properties-common
+ln -s /usr/bin/python3 /usr/bin/python
+
+(wget https://apt.repos.intel.com/openvino/2021/GPG-PUB-KEY-INTEL-OPENVINO-2021 && \
+    apt-key add GPG-PUB-KEY-INTEL-OPENVINO-2021 && rm GPG-PUB-KEY-INTEL-OPENVINO-2021 && \
+    cd /etc/apt/sources.list.d && \
+    echo "deb https://apt.repos.intel.com/openvino/2021 all main">intel-openvino-2021.list && \
+    apt update && \
+    apt install -y intel-openvino-dev-ubuntu20-${OPENVINO_VERSION})
+
+pip3 install numpy setuptools
+
+PYTHONPATH=/opt/intel/openvino_${OPENVINO_VERSION}/python/python3
+source /opt/intel/openvino_${OPENVINO_VERSION}/bin/setupvars.sh .
+
+# PS: Since variable shape tensors are not allowed, identity models may fail to generate
+python3 $SRCDIR/gen_qa_models.py --openvino --models_dir=$DESTDIR
+chmod -R 777 $DESTDIR
+python3 $SRCDIR/gen_qa_identity_models.py --openvino --models_dir=$IDENTITYDESTDIR
+chmod -R 777 $IDENTITYDESTDIR
+python3 $SRCDIR/gen_qa_reshape_models.py --openvino --models_dir=$RESHAPEDESTDIR
+chmod -R 777 $RESHAPEDESTDIR
+python3 $SRCDIR/gen_qa_sequence_models.py --openvino --models_dir=$SEQDESTDIR
+chmod -R 777 $SEQDESTDIR
+python3 $SRCDIR/gen_qa_dyna_sequence_models.py --openvino --models_dir=$DYNASEQDESTDIR
+chmod -R 777 $DYNASEQDESTDIR
+EOF
+
+chmod a+x $HOST_SRCDIR/$OPENVINOSCRIPT
+if [ $? -ne 0 ]; then
+    echo -e "Failed: chmod"
+    exit 1
+fi
+
+docker pull $ONNX_IMAGE
+docker run --gpus device=$CUDA_DEVICE --rm -it --entrypoint $SRCDIR/$OPENVINOSCRIPT \
+       --mount type=bind,source=$HOST_SRCDIR,target=$SRCDIR \
+       --mount type=bind,source=$HOST_DESTDIR,target=$DESTDIR \
+       --mount type=bind,source=$HOST_VARDESTDIR,target=$VARDESTDIR \
+       --mount type=bind,source=$HOST_IDENTITYDESTDIR,target=$IDENTITYDESTDIR \
+       --mount type=bind,source=$HOST_RESHAPEDESTDIR,target=$RESHAPEDESTDIR \
+       --mount type=bind,source=$HOST_SEQDESTDIR,target=$SEQDESTDIR \
+       --mount type=bind,source=$HOST_DYNASEQDESTDIR,target=$DYNASEQDESTDIR \
+       --mount type=bind,source=$HOST_VARSEQDESTDIR,target=$VARSEQDESTDIR \
+       --mount type=bind,source=$HOST_RAGGEDDESTDIR,target=$RAGGEDDESTDIR \
+       $ONNX_IMAGE
+if [ $? -ne 0 ]; then
+    echo -e "Failed"
+    exit 1
+fi
 
 # ONNX
 cat >$HOST_SRCDIR/$ONNXSCRIPT <<EOF

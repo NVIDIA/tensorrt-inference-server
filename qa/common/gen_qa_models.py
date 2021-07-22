@@ -1293,6 +1293,137 @@ output [
             lfile.write("label" + str(l) + "\n")
 
 
+def create_openvino_modelfile(models_dir,
+                              max_batch,
+                              model_version,
+                              input_shape,
+                              output0_shape,
+                              output1_shape,
+                              input_dtype,
+                              output0_dtype,
+                              output1_dtype,
+                              swap=False):
+
+    if not tu.validate_for_openvino_model(input_dtype, output0_dtype,
+                                          output1_dtype, input_shape,
+                                          output0_shape, output1_shape):
+        return
+
+    # Create the model
+    model_name = tu.get_model_name(
+        "openvino_nobatch" if max_batch == 0 else "openvino", input_dtype,
+        output0_dtype, output1_dtype)
+    model_version_dir = models_dir + "/" + model_name + "/" + str(model_version)
+
+    batch_dim = () if max_batch == 0 else (max_batch,)
+    in0 = ng.parameter(shape=batch_dim + input_shape, dtype=input_dtype, name="INPUT0")
+    in1 = ng.parameter(shape=batch_dim + input_shape, dtype=input_dtype, name="INPUT1")
+
+    r0 = ng.add(in0, in1) if not swap else ng.subtract(in0, in1)
+    r1 = ng.subtract(in0, in1) if not swap else ng.add(in0, in1)
+
+    result0 = ng.reshape(r0, batch_dim + output0_shape, special_zero=False)
+    result1 = ng.reshape(r1, batch_dim + output1_shape, special_zero=False)
+
+    op0 = ng.convert(result0, destination_type=output0_dtype, name="OUTPUT0")
+    op1 = ng.convert(result1, destination_type=output1_dtype, name="OUTPUT1")
+
+    function = ng.impl.Function([op0, op1], [in0, in1], model_name)
+    ie_network = IENetwork(ng.impl.Function.to_capsule(function))
+
+    # Batch size needs to be a positive integer value
+    # if max_batch != 0:
+    #     ie_network.batch_size = max_batch
+
+    try:
+        os.makedirs(model_version_dir)
+    except OSError as ex:
+        pass  # ignore existing dir
+
+    ie_network.serialize(model_version_dir + "/model.xml",
+                         model_version_dir + "/model.bin")
+
+
+def create_openvino_modelconfig(models_dir, max_batch, model_version,
+                                input_shape, output0_shape, output1_shape,
+                                input_dtype, output0_dtype, output1_dtype,
+                                output0_label_cnt, version_policy):
+
+    if not tu.validate_for_openvino_model(input_dtype, output0_dtype,
+                                          output1_dtype, input_shape,
+                                          output0_shape, output1_shape):
+        return
+
+    # Unpack version policy
+    version_policy_str = "{ latest { num_versions: 1 }}"
+    if version_policy is not None:
+        type, val = version_policy
+        if type == 'latest':
+            version_policy_str = "{{ latest {{ num_versions: {} }}}}".format(
+                val)
+        elif type == 'specific':
+            version_policy_str = "{{ specific {{ versions: {} }}}}".format(val)
+        else:
+            version_policy_str = "{ all { }}"
+
+    # Use a different model name for the non-batching variant
+    model_name = tu.get_model_name(
+        "openvino_nobatch" if max_batch == 0 else "openvino", input_dtype,
+        output0_dtype, output1_dtype)
+    config_dir = models_dir + "/" + model_name
+
+    # platform is empty and backend is 'openvino' for openvino model
+    config = '''
+name: "{}"
+backend: "openvino"
+max_batch_size: {}
+version_policy: {}
+input [
+  {{
+    name: "INPUT0"
+    data_type: {}
+    dims: [ {} ]
+  }},
+  {{
+    name: "INPUT1"
+    data_type: {}
+    dims: [ {} ]
+  }}
+]
+output [
+  {{
+    name: "OUTPUT0"
+    data_type: {}
+    dims: [ {} ]
+    label_filename: "output0_labels.txt"
+   }},
+  {{
+    name: "OUTPUT1"
+    data_type: {}
+    dims: [ {} ]
+  }}
+]
+'''.format(model_name, max_batch, version_policy_str,
+           np_to_model_dtype(input_dtype), tu.shape_to_dims_str(input_shape),
+           np_to_model_dtype(input_dtype), tu.shape_to_dims_str(input_shape),
+           np_to_model_dtype(output0_dtype),
+           tu.shape_to_dims_str(output0_shape),
+           np_to_model_dtype(output1_dtype),
+           tu.shape_to_dims_str(output1_shape))
+
+    try:
+        os.makedirs(config_dir)
+    except OSError as ex:
+        pass  # ignore existing dir
+
+    with open(config_dir + "/config.pbtxt", "w") as cfile:
+        cfile.write(config)
+
+    with open(config_dir + "/output0_labels.txt", "w") as lfile:
+        for l in range(output0_label_cnt):
+            lfile.write("label" + str(l) + "\n")
+
+
 def create_models(models_dir,
                   input_dtype,
                   output0_dtype,
@@ -1430,6 +1561,24 @@ def create_models(models_dir,
                                   output0_shape, output1_shape, input_dtype,
                                   output0_dtype, output1_dtype)
 
+    if FLAGS.openvino:
+        # max-batch 8
+        create_openvino_modelconfig(models_dir, 8, model_version, input_shape,
+                                    output0_shape, output1_shape, input_dtype,
+                                    output0_dtype, output1_dtype,
+                                    output0_label_cnt, version_policy)
+        create_openvino_modelfile(models_dir, 8, model_version, input_shape,
+                                  output0_shape, output1_shape, input_dtype,
+                                  output0_dtype, output1_dtype)
+        # max-batch 0
+        create_openvino_modelconfig(models_dir, 0, model_version, input_shape,
+                                    output0_shape, output1_shape, input_dtype,
+                                    output0_dtype, output1_dtype,
+                                    output0_label_cnt, version_policy)
+        create_openvino_modelfile(models_dir, 0, model_version, input_shape,
+                                  output0_shape, output1_shape, input_dtype,
+                                  output0_dtype, output1_dtype)
+
     if FLAGS.ensemble:
         for pair in emu.platform_types_and_validation():
             if not pair[1](input_dtype, output0_dtype, output1_dtype,
@@ -1516,6 +1665,10 @@ if __name__ == '__main__':
                         required=False,
                         action='store_true',
                         help='Generate Pytorch LibTorch models')
+    parser.add_argument('--openvino',
+                        required=False,
+                        action='store_true',
+                        help='Generate Openvino models')
     parser.add_argument('--variable',
                         required=False,
                         action='store_true',
@@ -1538,6 +1691,9 @@ if __name__ == '__main__':
     if FLAGS.libtorch:
         import torch
         from torch import nn
+    if FLAGS.openvino:
+        from openvino.inference_engine import IECore, IENetwork
+        import ngraph as ng
 
     import test_util as tu
 
@@ -1760,6 +1916,36 @@ if __name__ == '__main__':
                                           vt,
                                           swap=True)
                 create_libtorch_modelfile(FLAGS.models_dir,
+                                          0,
+                                          3, (16,), (16,), (16,),
+                                          vt,
+                                          vt,
+                                          vt,
+                                          swap=True)
+        if FLAGS.openvino:
+            for vt in [np.float16, np.float32, np.int8, np.int16, np.int32]:
+                create_openvino_modelfile(FLAGS.models_dir,
+                                          8,
+                                          2, (16,), (16,), (16,),
+                                          vt,
+                                          vt,
+                                          vt,
+                                          swap=True)
+                create_openvino_modelfile(FLAGS.models_dir,
+                                          8,
+                                          3, (16,), (16,), (16,),
+                                          vt,
+                                          vt,
+                                          vt,
+                                          swap=True)
+                create_openvino_modelfile(FLAGS.models_dir,
+                                          0,
+                                          2, (16,), (16,), (16,),
+                                          vt,
+                                          vt,
+                                          vt,
+                                          swap=True)
+                create_openvino_modelfile(FLAGS.models_dir,
                                           0,
                                           3, (16,), (16,), (16,),
                                           vt,

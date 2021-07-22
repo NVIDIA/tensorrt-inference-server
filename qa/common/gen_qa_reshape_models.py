@@ -631,6 +631,7 @@ def create_onnx_modelfile(models_dir, model_version, max_batch, dtype,
     if not tu.validate_for_onnx_model(dtype, dtype, dtype, input_shapes[0],
                                       input_shapes[0], input_shapes[0]):
         return
+
     onnx_dtype = np_to_onnx_dtype(dtype)
     io_cnt = len(input_shapes)
 
@@ -717,6 +718,118 @@ def create_onnx_modelconfig(models_dir, model_version, max_batch, dtype,
                                             output_model_shapes,
                                             emu.repeat(None, io_cnt),
                                             force_tensor_number_suffix=True)
+
+    try:
+        os.makedirs(config_dir)
+    except OSError as ex:
+        pass  # ignore existing dir
+
+    with open(config_dir + "/config.pbtxt", "w") as cfile:
+        cfile.write(config)
+
+
+def create_openvino_modelfile(models_dir, model_version, max_batch, dtype,
+                              input_shapes, output_shapes):
+
+    assert len(input_shapes) == len(output_shapes)
+    if not tu.validate_for_openvino_model(dtype, dtype, dtype, input_shapes[0],
+                                          input_shapes[0], input_shapes[0]):
+        return
+
+    io_cnt = len(input_shapes)
+
+    # Create the model
+    model_name = tu.get_zero_model_name(
+        "openvino_nobatch" if max_batch == 0 else "openvino", io_cnt, dtype)
+    model_version_dir = models_dir + "/" + model_name + "/" + str(model_version)
+
+    batch_dim = () if max_batch == 0 else (max_batch,)
+    openvino_inputs = []
+    openvino_outputs = []
+    for io_num in range(io_cnt):
+        in_name = "INPUT{}".format(io_num)
+        out_name = "OUTPUT{}".format(io_num)
+        openvino_inputs.append(
+            ng.parameter(shape=batch_dim + input_shapes[io_num], dtype=dtype, name=in_name))
+
+        if input_shapes[io_num] == output_shapes[io_num]:
+            openvino_outputs.append(
+                ng.result(openvino_inputs[io_num], name=out_name))
+        else:
+            openvino_outputs.append(
+                ng.reshape(openvino_inputs[io_num],
+                           batch_dim + output_shapes[io_num],
+                           name=out_name, special_zero=False))
+
+    function = ng.impl.Function(openvino_outputs, openvino_inputs, model_name)
+    ie_network = IENetwork(ng.impl.Function.to_capsule(function))
+
+    # Batch size needs to be a positive integer value
+    # if max_batch != 0:
+    #     ie_network.batch_size = max_batch
+
+    try:
+        os.makedirs(model_version_dir)
+    except OSError as ex:
+        pass  # ignore existing dir
+
+    ie_network.serialize(model_version_dir + "/model.xml",
+                         model_version_dir + "/model.bin")
+
+
+def create_openvino_modelconfig(models_dir, model_version, max_batch, dtype,
+                                input_shapes, input_model_shapes, output_shapes,
+                                output_model_shapes):
+
+    assert len(input_shapes) == len(input_model_shapes)
+    assert len(output_shapes) == len(output_model_shapes)
+    assert len(input_shapes) == len(output_shapes)
+    if not tu.validate_for_openvino_model(dtype, dtype, dtype, input_shapes[0],
+                                          input_shapes[0], input_shapes[0]):
+        return
+
+    io_cnt = len(input_shapes)
+
+    # Use a different model name for the non-batching variant
+    model_name = tu.get_zero_model_name(
+        "openvino_nobatch" if max_batch == 0 else "openvino", io_cnt, dtype)
+    config_dir = models_dir + "/" + model_name
+
+    config = '''
+name: "{}"
+backend: "openvino"
+max_batch_size: {}
+'''.format(model_name, max_batch)
+
+    for io_num in range(io_cnt):
+        config += '''
+input [
+  {{
+    name: "INPUT__{}"
+    data_type: {}
+    dims: [ {} ]
+    {}
+  }}
+]
+output [
+  {{
+    name: "OUTPUT__{}"
+    data_type: {}
+    dims: [ {} ]
+    {}
+  }}
+]
+'''.format(
+            io_num, np_to_model_dtype(dtype),
+            tu.shape_to_dims_str(input_shapes[io_num]),
+            "reshape: {{ shape: [ {} ] }}".format(
+                tu.shape_to_dims_str(input_model_shapes[io_num]))
+            if input_shapes[io_num] != input_model_shapes[io_num] else "",
+            io_num, np_to_model_dtype(dtype),
+            tu.shape_to_dims_str(output_shapes[io_num]),
+            "reshape: {{ shape: [ {} ] }}".format(
+                tu.shape_to_dims_str(output_model_shapes[io_num]))
+            if output_shapes[io_num] != output_model_shapes[io_num] else "")
 
     try:
         os.makedirs(config_dir)
@@ -857,6 +970,33 @@ def create_libtorch_models(models_dir,
                                       input_model_shapes, output_model_shapes)
 
 
+def create_openvino_models(models_dir,
+                           dtype,
+                           input_shapes,
+                           input_model_shapes,
+                           output_shapes=None,
+                           output_model_shapes=None,
+                           no_batch=True):
+    model_version = 1
+    if output_shapes is None:
+        output_shapes = input_shapes
+    if output_model_shapes is None:
+        output_model_shapes = input_model_shapes
+
+    if FLAGS.openvino:
+        create_openvino_modelconfig(models_dir, model_version, 8, dtype,
+                                    input_shapes, input_model_shapes,
+                                    output_shapes, output_model_shapes)
+        create_openvino_modelfile(models_dir, model_version, 8, dtype,
+                                  input_model_shapes, output_model_shapes)
+        if no_batch:
+            create_openvino_modelconfig(models_dir, model_version, 0, dtype,
+                                        input_shapes, input_model_shapes,
+                                        output_shapes, output_model_shapes)
+            create_openvino_modelfile(models_dir, model_version, 0, dtype,
+                                      input_model_shapes, output_model_shapes)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--models_dir',
@@ -889,6 +1029,10 @@ if __name__ == '__main__':
                         required=False,
                         action='store_true',
                         help='Generate Pytorch LibTorch models')
+    parser.add_argument('--openvino',
+                        required=False,
+                        action='store_true',
+                        help='Generate OpenVino models')
     parser.add_argument('--ensemble',
                         required=False,
                         action='store_true',
@@ -909,11 +1053,14 @@ if __name__ == '__main__':
     if FLAGS.libtorch:
         import torch
         from torch import nn
+    if FLAGS.openvino:
+        from openvino.inference_engine import IECore, IENetwork
+        import ngraph as ng
 
     import test_util as tu
 
-    # TensorRT and LibTorch must be handled separately since it doesn't support
-    # zero-sized tensors.
+    # TensorRT, OpenVino and LibTorch must be handled separately since they
+    # don't support zero-sized tensors.
     create_models(FLAGS.models_dir,
                   np_dtype_string, ([1],), ([],),
                   no_batch=False)
@@ -931,6 +1078,14 @@ if __name__ == '__main__':
                            no_batch=False)
     create_libtorch_models(FLAGS.models_dir, np.float32,
                            ([4, 4], [2], [2, 2, 3]), ([16], [1, 2], [3, 2, 2]))
+    create_openvino_models(FLAGS.models_dir,
+                           np.float32, ([1],), ([1, 1, 1],),
+                           no_batch=False)
+    create_openvino_models(FLAGS.models_dir,
+                           np.float32, ([1], [8]), ([1, 1, 1], [4, 1, 2]),
+                           no_batch=False)
+    create_openvino_models(FLAGS.models_dir, np.float32,
+                           ([4, 4], [2], [2, 2, 3]), ([16], [1, 2], [3, 2, 2]))
     create_trt_models(FLAGS.models_dir, np.float32, ([1], [8]),
                       ([1, 1, 1], [4, 1, 2]))
 
@@ -942,6 +1097,12 @@ if __name__ == '__main__':
                   output_model_shapes=([16], [1, 2], [3, 2, 2], [1]))
 
     create_libtorch_models(FLAGS.models_dir,
+                           np.float32, ([4, 4], [2], [2, 2, 3], [1]),
+                           ([16], [1, 2], [3, 2, 2], [1]),
+                           output_shapes=([16], [1, 2], [3, 2, 2], [1]),
+                           output_model_shapes=([16], [1, 2], [3, 2, 2], [1]))
+
+    create_openvino_models(FLAGS.models_dir,
                            np.float32, ([4, 4], [2], [2, 2, 3], [1]),
                            ([16], [1, 2], [3, 2, 2], [1]),
                            output_shapes=([16], [1, 2], [3, 2, 2], [1]),
