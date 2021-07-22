@@ -65,13 +65,13 @@ from distutils.dir_util import copy_tree
 # incorrectly load the other version of the openvino libraries.
 #
 TRITON_VERSION_MAP = {
-    '2.12.0':
-      ('21.07',   # triton container
-       '21.07',      # upstream container
-       '1.8.0',      # ORT
-       '2021.2.200', # ORT OpenVINO
-       '2021.2',     # Standalone OpenVINO
-       '2.2.8')      # DCGM version
+    '2.12.0': (
+        '21.07',  # triton container
+        '21.07',  # upstream container
+        '1.8.0',  # ORT
+        '2021.2.200',  # ORT OpenVINO
+        '2021.2',  # Standalone OpenVINO
+        '2.2.3')  # DCGM version
 }
 
 EXAMPLE_BACKENDS = ['identity', 'square', 'repeat']
@@ -479,7 +479,9 @@ def dali_cmake_args():
 def install_dcgm_libraries():
     dcgm_version = ''
     if FLAGS.version not in TRITON_VERSION_MAP:
-        fail('unable to determine default repo-tag, DCGM version not known for {}'.format(FLAGS.version))
+        fail(
+            'unable to determine default repo-tag, DCGM version not known for {}'
+            .format(FLAGS.version))
     else:
         dcgm_version = TRITON_VERSION_MAP[FLAGS.version][5]
     return '''
@@ -589,6 +591,9 @@ COPY . .
 ENTRYPOINT []
 '''
         df += install_dcgm_libraries()
+        df += '''
+RUN patch -ruN -d /usr/include/ < /workspace/build/libdcgm/dcgm_api_export.patch
+'''
 
     df += '''
 ENV TRITON_SERVER_VERSION ${TRITON_VERSION}
@@ -1250,8 +1255,8 @@ if __name__ == '__main__':
     if cver is None:
         if FLAGS.version not in TRITON_VERSION_MAP:
             fail(
-                'unable to determine default repo-tag, container version not known for {}'.format(
-                    FLAGS.version))
+                'unable to determine default repo-tag, container version not known for {}'
+                .format(FLAGS.version))
         cver = TRITON_VERSION_MAP[FLAGS.version][0]
     if not cver.endswith('dev'):
         default_repo_tag = 'r' + cver
