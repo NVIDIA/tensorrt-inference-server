@@ -1,1 +1,1 @@
-unexpected datatype TYPE_FP32 for input 'INPUT0', expecting TYPE_FP16
+unexpected datatype TYPE_FP32 for inference input 'INPUT0', expecting TYPE_FP16 for bad_input_type

@@ -1,1 +1,1 @@
-model 'bad_input_dims_0_gpu0', tensor 'INPUT1': the model expects 1 dimensions (shape \[16\]) but the model configuration specifies 2 dimensions (shape \[16,1\])
+model 'bad_input_dims', tensor 'INPUT1': the model expects 1 dimensions (shape \[16\]) but the model configuration specifies 2 dimensions (shape \[16,1\])

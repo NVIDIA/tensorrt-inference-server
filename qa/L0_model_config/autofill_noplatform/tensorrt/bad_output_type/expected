@@ -1,1 +1,1 @@
-unexpected datatype TYPE_FP32 for inference output 'OUTPUT1', expecting TYPE_INT8
+unexpected datatype TYPE_FP32 for inference output 'OUTPUT1', expecting TYPE_INT8 for bad_output_type

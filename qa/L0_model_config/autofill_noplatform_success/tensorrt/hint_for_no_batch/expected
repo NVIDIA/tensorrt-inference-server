@@ -44,3 +44,4 @@ optimization {
     enable: true
   }
 }
+backend: "tensorrt"

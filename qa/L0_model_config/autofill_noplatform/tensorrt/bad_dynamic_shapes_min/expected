@@ -1,1 +1,1 @@
-model configuration specified invalid shape for input 'INPUT0' for bad_dynamic_shapes_min_0_gpu0. Error details: model expected the shape of dimension 0 to be between 4 and 32 but received 3
+model configuration specified invalid shape for input 'INPUT0' for model bad_dynamic_shapes_min. Error details: model expected the shape of dimension 0 to be between 4 and 32 but received 3
