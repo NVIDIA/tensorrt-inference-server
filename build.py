@@ -65,13 +65,13 @@ from distutils.dir_util import copy_tree
 # incorrectly load the other version of the openvino libraries.
 #
 TRITON_VERSION_MAP = {
-    '2.13.0dev':
-      ('21.08dev',   # triton container
-       '21.06',      # upstream container
-       '1.8.0',      # ORT
-       '2021.2.200', # ORT OpenVINO
-       '2021.2',     # Standalone OpenVINO
-       '2.2.8')      # DCGM version
+    '2.13.0dev': (
+        '21.08dev',  # triton container
+        '21.06',  # upstream container
+        '1.8.0',  # ORT
+        '2021.2.200',  # ORT OpenVINO
+        '2021.2',  # Standalone OpenVINO
+        '2.2.8')  # DCGM version
 }
 
 EXAMPLE_BACKENDS = ['identity', 'square', 'repeat']
@@ -474,13 +474,16 @@ def dali_cmake_args():
     ]
 
 
-def install_dcgm_libraries():
-    dcgm_version = ''
-    if FLAGS.version not in TRITON_VERSION_MAP:
-        fail('unable to determine default repo-tag, DCGM version not known for {}'.format(FLAGS.version))
+def install_dcgm_libraries(dcgm_version):
+    if dcgm_version == '':
+        fail(
+            'unable to determine default repo-tag, DCGM version not known for {}'
+            .format(FLAGS.version))
+        return ''
     else:
-        dcgm_version = TRITON_VERSION_MAP[FLAGS.version][5]
-    return '''
+
+        return '''
+ENV DCGM_VERSION {}
 # Install DCGM. Steps from https://developer.nvidia.com/dcgm#Downloads
 RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common
 RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-ubuntu2004.pin \
@@ -489,7 +492,7 @@ RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86
 && add-apt-repository "deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/ /"
 RUN apt-get update \
 && apt-get install -y datacenter-gpu-manager=1:{}
-'''.format(dcgm_version)
+'''.format(dcgm_version, dcgm_version)
 
 
 def fil_cmake_args(images):
@@ -503,7 +506,20 @@ def fil_cmake_args(images):
     return cargs
 
 
-def create_dockerfile_buildbase(ddir, dockerfile_name, argmap, backends):
+def get_container_versions(version, container_version,
+                           upstream_container_version):
+    if container_version is None:
+        if version not in TRITON_VERSION_MAP:
+            fail('container version not known for {}'.format(version))
+        container_version = TRITON_VERSION_MAP[version][0]
+    if upstream_container_version is None:
+        if version not in TRITON_VERSION_MAP:
+            fail('upstream container version not known for {}'.format(version))
+        upstream_container_version = TRITON_VERSION_MAP[version][1]
+    return container_version, upstream_container_version
+
+
+def create_dockerfile_buildbase(ddir, dockerfile_name, argmap):
     df = '''
 ARG TRITON_VERSION={}
 ARG TRITON_CONTAINER_VERSION={}
@@ -586,7 +602,7 @@ RUN rm -fr *
 COPY . .
 ENTRYPOINT []
 '''
-        df += install_dcgm_libraries()
+        df += install_dcgm_libraries(argmap['DCGM_VERSION'])
 
     df += '''
 ENV TRITON_SERVER_VERSION ${TRITON_VERSION}
@@ -598,7 +614,7 @@ ENV NVIDIA_TRITON_SERVER_VERSION ${TRITON_CONTAINER_VERSION}
         dfile.write(df)
 
 
-def create_dockerfile_build(ddir, dockerfile_name, argmap, backends):
+def create_dockerfile_build(ddir, dockerfile_name, backends):
     df = '''
 FROM tritonserver_builder_image AS build
 FROM tritonserver_buildbase
@@ -641,19 +657,60 @@ FROM ${{BUILD_IMAGE}} AS tritonserver_build
 ##  Production stage: Create container with just inference server executable
 ############################################################################
 FROM ${{BASE_IMAGE}}
+'''.format(argmap['TRITON_VERSION'], argmap['TRITON_CONTAINER_VERSION'],
+           argmap['BASE_IMAGE'])
 
+    df += dockerfile_prepare_container_linux(argmap, backends)
+
+    df += '''
+WORKDIR /opt/tritonserver
+COPY --chown=1000:1000 LICENSE .
+COPY --chown=1000:1000 TRITON_VERSION .
+COPY --chown=1000:1000 NVIDIA_Deep_Learning_Container_License.pdf .
+COPY --chown=1000:1000 --from=tritonserver_build /tmp/tritonbuild/install/bin/tritonserver bin/
+COPY --chown=1000:1000 --from=tritonserver_build /tmp/tritonbuild/install/lib/libtritonserver.so lib/
+COPY --chown=1000:1000 --from=tritonserver_build /tmp/tritonbuild/install/include/triton/core include/triton/core
+
+# Top-level include/core not copied so --chown does not set it correctly,
+# so explicit set on all of include
+RUN chown -R triton-server:triton-server include
+'''
+
+    for noncore in NONCORE_BACKENDS:
+        if noncore in backends:
+            df += '''
+COPY --chown=1000:1000 --from=tritonserver_build /tmp/tritonbuild/install/backends backends
+'''
+            break
+
+    if len(repoagents) > 0:
+        df += '''
+COPY --chown=1000:1000 --from=tritonserver_build /tmp/tritonbuild/install/repoagents repoagents
+'''
+    # Add feature labels for SageMaker endpoint
+    if 'sagemaker' in endpoints:
+        df += '''
+LABEL com.amazonaws.sagemaker.capabilities.accept-bind-to-port=true
+COPY --chown=1000:1000 --from=tritonserver_build /workspace/build/sagemaker/serve /usr/bin/.
+'''
+    mkdir(ddir)
+    with open(os.path.join(ddir, dockerfile_name), "w") as dfile:
+        dfile.write(df)
+
+
+def dockerfile_prepare_container_linux(argmap, backends):
+    # Common steps to produce docker images shared by build.py and compose.py.
+    # Sets enviroment variables, installs dependencies and adds entrypoint
+    df = '''
 ARG TRITON_VERSION
 ARG TRITON_CONTAINER_VERSION
 
-ENV TRITON_SERVER_VERSION ${{TRITON_VERSION}}
-ENV NVIDIA_TRITON_SERVER_VERSION ${{TRITON_CONTAINER_VERSION}}
-ENV TRITON_SERVER_VERSION ${{TRITON_VERSION}}
-ENV NVIDIA_TRITON_SERVER_VERSION ${{TRITON_CONTAINER_VERSION}}
-LABEL com.nvidia.tritonserver.version="${{TRITON_SERVER_VERSION}}"
+ENV TRITON_SERVER_VERSION ${TRITON_VERSION}
+ENV NVIDIA_TRITON_SERVER_VERSION ${TRITON_CONTAINER_VERSION}
+LABEL com.nvidia.tritonserver.version="${TRITON_SERVER_VERSION}"
 
-ENV PATH /opt/tritonserver/bin:${{PATH}}
-'''.format(argmap['TRITON_VERSION'], argmap['TRITON_CONTAINER_VERSION'],
-           argmap['BASE_IMAGE'])
+ENV PATH /opt/tritonserver/bin:${PATH}
+'''
     df += '''
 ENV TF_ADJUST_HUE_FUSED         1
 ENV TF_ADJUST_SATURATION_FUSED  1
@@ -683,7 +740,7 @@ RUN apt-get update && \
          libre2-5 && \
     rm -rf /var/lib/apt/lists/*
 '''
-    df += install_dcgm_libraries()
+    df += install_dcgm_libraries(argmap['DCGM_VERSION'])
     # Add dependencies needed for python backend
     if 'python' in backends:
         df += '''
@@ -698,58 +755,25 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 '''
     df += '''
+# Extra defensive wiring for CUDA Compat lib
+RUN ln -sf ${_CUDA_COMPAT_PATH}/lib.real ${_CUDA_COMPAT_PATH}/lib \
+ && echo ${_CUDA_COMPAT_PATH}/lib > /etc/ld.so.conf.d/00-cuda-compat.conf \
+ && ldconfig \
+ && rm -f ${_CUDA_COMPAT_PATH}/lib
+
 WORKDIR /opt/tritonserver
 RUN rm -fr /opt/tritonserver/*
-COPY --chown=1000:1000 LICENSE .
-COPY --chown=1000:1000 TRITON_VERSION .
-COPY --chown=1000:1000 NVIDIA_Deep_Learning_Container_License.pdf .
-COPY --chown=1000:1000 --from=tritonserver_build /tmp/tritonbuild/install/bin/tritonserver bin/
-COPY --chown=1000:1000 --from=tritonserver_build /tmp/tritonbuild/install/lib/libtritonserver.so lib/
-COPY --chown=1000:1000 --from=tritonserver_build /tmp/tritonbuild/install/include/triton/core include/triton/core
-
-# Top-level include/core not copied so --chown does not set it correctly,
-# so explicit set on all of include
-RUN chown -R triton-server:triton-server include
-'''
-
-    for noncore in NONCORE_BACKENDS:
-        if noncore in backends:
-            df += '''
-COPY --chown=1000:1000 --from=tritonserver_build /tmp/tritonbuild/install/backends backends
-'''
-            break
-
-    if len(repoagents) > 0:
-        df += '''
-COPY --chown=1000:1000 --from=tritonserver_build /tmp/tritonbuild/install/repoagents repoagents
-'''
-
-    df += '''
-# Extra defensive wiring for CUDA Compat lib
-RUN ln -sf ${{_CUDA_COMPAT_PATH}}/lib.real ${{_CUDA_COMPAT_PATH}}/lib \
- && echo ${{_CUDA_COMPAT_PATH}}/lib > /etc/ld.so.conf.d/00-cuda-compat.conf \
- && ldconfig \
- && rm -f ${{_CUDA_COMPAT_PATH}}/lib
-
-COPY --chown=1000:1000 nvidia_entrypoint.sh /opt/tritonserver
+COPY --chown=1000:1000 nvidia_entrypoint.sh .
 ENTRYPOINT ["/opt/tritonserver/nvidia_entrypoint.sh"]
-
+'''
+    df += '''
 ENV NVIDIA_BUILD_ID {}
 LABEL com.nvidia.build.id={}
 LABEL com.nvidia.build.ref={}
 '''.format(argmap['NVIDIA_BUILD_ID'], argmap['NVIDIA_BUILD_ID'],
            argmap['NVIDIA_BUILD_REF'])
 
-    # Add feature labels for SageMaker endpoint
-    if 'sagemaker' in endpoints:
-        df += '''
-LABEL com.amazonaws.sagemaker.capabilities.accept-bind-to-port=true
-COPY --chown=1000:1000 --from=tritonserver_build /workspace/build/sagemaker/serve /usr/bin/.
-'''
-
-    mkdir(ddir)
-    with open(os.path.join(ddir, dockerfile_name), "w") as dfile:
-        dfile.write(df)
+    return df
 
 
 def create_dockerfile_windows(ddir, dockerfile_name, argmap, backends,
@@ -777,8 +801,6 @@ FROM ${{BASE_IMAGE}}
 ARG TRITON_VERSION
 ARG TRITON_CONTAINER_VERSION
 
-ENV TRITON_SERVER_VERSION ${{TRITON_VERSION}}
-ENV NVIDIA_TRITON_SERVER_VERSION ${{TRITON_CONTAINER_VERSION}}
 ENV TRITON_SERVER_VERSION ${{TRITON_VERSION}}
 ENV NVIDIA_TRITON_SERVER_VERSION ${{TRITON_CONTAINER_VERSION}}
 LABEL com.nvidia.tritonserver.version="${{TRITON_SERVER_VERSION}}"
@@ -849,6 +871,9 @@ def container_build(images, backends, repoagents, endpoints):
             FLAGS.container_version,
         'BASE_IMAGE':
             base_image,
+        'DCGM_VERSION':
+            '' if FLAGS.version is None or FLAGS.version
+            not in TRITON_VERSION_MAP else TRITON_VERSION_MAP[FLAGS.version][5],
     }
 
     cachefrommap = [
@@ -868,7 +893,7 @@ def container_build(images, backends, repoagents, endpoints):
 
     log_verbose('buildbase container {}'.format(commonargs + cachefromargs))
     create_dockerfile_buildbase(FLAGS.build_dir, 'Dockerfile.buildbase',
-                                dockerfileargmap, backends)
+                                dockerfileargmap)
     try:
         # Create buildbase image, this is an image with all
         # dependencies needed for the build.
@@ -980,8 +1005,7 @@ def container_build(images, backends, repoagents, endpoints):
         container.commit('tritonserver_builder_image', 'latest')
         container.remove(force=True)
 
-        create_dockerfile_build(FLAGS.build_dir, 'Dockerfile.build',
-                                dockerfileargmap, backends)
+        create_dockerfile_build(FLAGS.build_dir, 'Dockerfile.build', backends)
         p = subprocess.Popen([
             'docker', 'build', '-t', 'tritonserver_build', '-f',
             os.path.join(FLAGS.build_dir, 'Dockerfile.build'), '.'
@@ -1248,8 +1272,8 @@ if __name__ == '__main__':
     if cver is None:
         if FLAGS.version not in TRITON_VERSION_MAP:
             fail(
-                'unable to determine default repo-tag, container version not known for {}'.format(
-                    FLAGS.version))
+                'unable to determine default repo-tag, container version not known for {}'
+                .format(FLAGS.version))
         cver = TRITON_VERSION_MAP[FLAGS.version][0]
     if not cver.endswith('dev'):
         default_repo_tag = 'r' + cver
@@ -1258,16 +1282,9 @@ if __name__ == '__main__':
     # For other versions use the TRITON_VERSION_MAP unless explicitly
     # given.
     if not FLAGS.no_container_build:
-        if FLAGS.container_version is None:
-            if FLAGS.version not in TRITON_VERSION_MAP:
-                fail('container version not known for {}'.format(FLAGS.version))
-        FLAGS.container_version = TRITON_VERSION_MAP[FLAGS.version][0]
-        if FLAGS.upstream_container_version is None:
-            if FLAGS.version not in TRITON_VERSION_MAP:
-                fail('upstream container version not known for {}'.format(
-                    FLAGS.version))
-            FLAGS.upstream_container_version = TRITON_VERSION_MAP[
-                FLAGS.version][1]
+        FLAGS.container_version, FLAGS.upstream_container_version = get_container_versions(
+            FLAGS.version, FLAGS.container_version,
+            FLAGS.upstream_container_version)
 
         log('container version {}'.format(FLAGS.container_version))
         log('upstream container version {}'.format(
