@@ -126,7 +126,6 @@ FetchContent_Declare(
   repo-third-party
   GIT_REPOSITORY https://github.com/triton-inference-server/third_party.git
   GIT_TAG ${TRITON_THIRD_PARTY_REPO_TAG}
-  GIT_SHALLOW ON
 )
 set(TRITON_THIRD_PARTY_INSTALL_PREFIX ${CMAKE_CURRENT_BINARY_DIR}/third-party)
 FetchContent_MakeAvailable(repo-third-party)
